@@ -1,0 +1,842 @@
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+STOP_GLOBALS_SUB:
+
+	WAIT_GLOBAL
+	WAIT_GLOBAL
+
+	SEND_MESSAGE 12H, TRX
+	sleepy	200
+	RET
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+START_GLOBALS_SUB:
+
+	CALL	N_UART		;SET UP UART FOR DATA TRANSFER NOKIA BUS
+;-----------
+		
+wait_acty:
+	setb	bypass
+	clr	hin
+	clr	hout
+	clr	rout
+	setb	Rin
+	CLR	RI
+
+	;this can be improved by testing with wait_message to see if there
+	;are globals or noops before trying to restore them.
+
+	sleepy	30		;NEED TO WAIT ENOUGH TO AVOID INTERRUPTING ACK
+;	sleepy	250		;NEED TO WAIT ENOUGH TO AVOID INTERRUPTING ACK
+	jb	ri,wait_acty
+
+	SEND_MESSAGE 41H, TRX, <0H, 7DH>, 0	;MEMORY DUMP
+	jeq	f_error, #0, continue
+
+;;;
+	clr	ready			;allow watch dog timer to count
+
+
+	send_message 05h, trx, <86h>	;press on/off, to clear hset
+	jmp	wait_acty
+
+
+
+continue:
+	clr	ea			;prevent interrupts change acc
+
+	MOV	A,#7FH			;reset MSB data bit from recv R_DATA
+	ANL	A,R_DATA
+	MOV	R_DATA,A		;store modified data byte to be resend
+					;insert data byte from R_DATA
+	sleepy	200
+	send_message 26h, TRX, <0h, 7dh, XBYTE>	 ;change byte in memory
+
+	setb	ea
+
+
+global_loop:
+	wait_message trx
+;	get_message trx
+	jne	f_error, #0, wait_acty
+	jeq	r_type, #7fh, global_exit
+	jeq	r_type, #00h, global_exit
+
+	jmp	global_loop
+
+
+global_exit:
+	setb	ea
+
+	ret
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+WAIT_GLOBAL_SUB:
+
+;this procedure is called by the macro WAIT_GLOBAL
+
+;	1) sets UART to talk to nokia bus, 
+;	2) waits for a silence in the data bus
+;	3) invoques GET_MESSAGE until a global has been received
+;	5) GET_MESSAGE has also updated the Sequence Number
+	
+;this routine reads the status of the call from the data bus and sets
+;F_CALL if a call is in progress or clears it otherwise.
+;used to stop the call timer clock.
+
+
+	PUSH	ACC
+	PUSH	PSW
+
+
+	; REGISTER BANK 2, RS0=0, RS1=1	MODEM/DTMF | BUS READ
+	clr	rs0
+	setb	rs1
+WAIT_IDLEx:	
+	clr	rout
+	clr	hout
+	clr	hin
+	setb	RIN
+	CLR	RI
+;;;
+	setb	ea
+	waitf1 ri, 2, no_glob
+	jmp	wait_idle
+
+;------------------
+
+no_glob:
+	start_globals
+	jmp	wait_idlex
+
+WAIT_IDLE:	
+	setb	RIN
+	CLR	RI
+	s_waitf1	ri, 20, x_go
+	jmp	wait_idle
+
+x_go:
+;.....
+	
+	; there has been a silence after last packet, get next byte
+	; initialize global and noop loop counters
+	mov	x_loop,#4	;# of times to wait for consecutive 7f globals
+				;if it's <4 it has problems 
+				;(i.e. sensing ignition off)
+	mov	y_loop,#4	;;# of times to wait for consecutive 00 noop's
+WAIT_GLB:
+	wait_MESSAGE TRX, 1		;get data[1] (call status) into R_DATA
+	jeq	f_error, #0, go1	;no error
+	jeq	f_error, #1, wait_idle	;ack corrupted
+	JMP	WAIT_IDLEX		;no bus activity (error = 2)
+	
+go1:
+	MOV	A,R_TYPE
+	CJNE	A,#0,XGO1		;IF IT'S NOT A NOOP check global 7f
+	djnz	y_loop,wait_glb
+	setb	global
+	clr	f_power			;power must be off if there are noops
+	JMP	complete
+
+XGO1:
+	MOV	A,R_TYPE
+	CJNE	A,#7FH,WAIT_IDLE	;wait until a global command
+	djnz	x_loop,wait_glb		;loop until expected # of globals
+
+
+
+	; STORE RECEIVED GLOBAL SEQUENCE NUMBER
+	setb	global
+	mov	r0,#R_BUFF	;initialize pointer to comm IN BUFFER  
+	INC	R0		;point to sequence number byte
+	INC	R0
+	mov	A,@r0		;retrieve seq number
+	MOV	G_SEQN,A
+COMPLETE:
+;------------------------------------
+	; test if hset is trying to talk after this global
+;;;
+	setb	RIN
+	CLR	RI
+	s_waitf1	ri, 10, x_done
+	jmp	wait_idle
+x_done:
+
+;------------------------------------
+	clr	RIN		;disable reading data bus
+	POP	PSW		;RETURN TO PREVIOUS REG. BANK
+	POP	ACC
+	RET
+
+;-----------------------------------------------------------------
+
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+GET_MESSAGE_SUB:
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+
+
+;this routine reads the data bus and places the data in r_buff
+;reading is immediate. This routine can only be used in the following cases:
+;	1)	right after a "WAIT_GLOBAL" command
+;	2)	anytime between a "STOP_GLOBALS" and "START_GLOBALS"
+;	3)	right after a "SEND_MESSAGE" (this is done automatically)
+
+;if used any other time it may give incorrect results since it would not know
+;the begining of the data packet
+
+;verifies if received length is within 4 to 20 bytes. Gives an error otherwise
+;verifies if received checksum is correct. Error otherwise.
+;stores message type in variable R_TYPE for acknowledgement error detection 
+;stores a selected byte from received data and stores it to R_DATA
+
+; if there is an error receiving a message it will place in F_ERROR (R5)
+; the following codes:
+;	00h	message received ok (message type in R_TYPE)
+;	01h	message corrupted (checksum error)
+;	02h	no messages (time out, no bus activity)
+;this is used to decide if the globals are on or off and to avoid collisions
+
+	PUSH	PSW
+
+;REGISTER BANK 2, RS0=0, RS1=1			MODEM/DTMF | BUS READ
+	clr	rs0
+	setb	rs1
+
+
+
+;-----------------------------------------------------------------
+	
+	mov	r0,#R_BUFF	;initialize pointer to comm IN BUFFER  
+;-----------------------------------------------------------------
+;;
+	jne	r_data, #99, juliet
+	mov	r_data, r6		;get default data byte from buffer
+juliet:
+	mov	r6, r_data
+
+	;DIRECTION FOR DATA BUS
+	jmpb	bus_way, 1, HSET_WAY
+TRX_WAY:
+	CLR	ROUT
+	CLR	HIN
+	CLR	HOUT
+	SETB	RIN
+	jmp	exit_way
+
+HSET_WAY:
+	CLR	HOUT
+	CLR	RIN
+	CLR	ROUT
+	SETB	HIN
+EXIT_WAY:
+
+
+GETBYTE:
+	
+	MOV	R4,#0			;initialize DATA BYTE COUNT
+
+;;;
+
+	setb	ea			; allow timer to count
+	jmpb	read_nok, 0, norm_dly
+long_dly:
+	s_waitf1 ri, 50, x_error2	; increase time if reading mem nokia
+;	s_waitf1 ri, 60, x_error2	; increase time if reading mem nokia
+	jmp	exit_dly
+
+norm_dly:
+	s_waitf1 ri, 30, x_error2	; original
+exit_dly:
+	clr	ea			; disable interrupts to avoid corrupt
+;----------------------------------
+;----------------------------------
+
+
+	CLR	RI
+	MOV	A,SBUF
+
+	mov	@r0,a		;store first byte (packet length) in BUFFER
+	INC	R0
+
+;----------------------------------
+	anl	a,#1fh		;get length of packet
+	JZ	GETBYTE		;IF ZERO, IGNORE
+	MOV	R7,A		;retrieve packet length
+
+;--------------------------------------------------------------------
+	;test here if length is within 4-20 bytes. otherwise return an error
+	;similar to the checksum, jumping to X_ERROR 
+;--------------------------------------------------------------------
+
+STORE:
+	DJNZ	R7,NOTEND	;IF R7=ZERO => END OF PACKET
+	JMP	ENDM
+
+NOTEND:
+;;
+	setb	ea
+	s_waitf1 ri, 10, x_error2
+;	s_waitf1 ri, 200, x_error2
+	clr	ea
+
+	CLR	RI
+	MOV	A,SBUF
+	mov	@r0,a		;loop to store next DATA bytes in BUFFER
+	INC	R0
+	JMP	STORE
+
+ENDM:
+;------------------
+	; compare received and calculated CHECKSUMS
+	MOV	R0,#R_BUFF	;SET PACKET POINTER
+	MOV	A,@R0		;RETRIEVE PACKET LENGTH
+	ANL	A,#1FH		;STRIP OFF ORIGIN BYTE
+	DEC	A		;do not include checksum in the length
+	MOV	R7,A		;STORE PACKET LENGTH IN R7
+	MOV	R3,#0		;CLEAR PARTIAL CHECKSUM 
+X_CSUM:
+	MOV	A,@R0
+	ADD	A,R3
+	MOV	R3,A		;store partial sum
+	INC	R0
+	DJNZ	R7,X_CSUM	;r7 holds the packet length
+	MOV	A,R3
+	CLR	C
+	SUBB	A,@R0
+	JZ	X_OK
+x_error1:
+	MOV	f_error, #1		;SET ERROR FLAG. corrupted message
+	JMP	X_END
+
+x_error2:
+	MOV	f_error, #2		;SET ERROR FLAG. no bus activity
+	JMP	X_END
+
+;------------------
+X_OK:
+	MOV	f_error, #0		;CLEAR ERROR FLAG
+
+	; STORE received MESSAGE TYPE IN R_TYPE	
+	mov	r0,#R_BUFF	;REinitialize pointer  
+	INC	R0		;POINT TO MESSAGE TYPE
+	MOV	A,@R0		;RETRIEVE MESS. TYPE
+	MOV	R_TYPE,A
+
+	; STORE received SEQUENCE NUMBER IN R_SEQN
+	INC	R0		;POINT TO SEQNUM
+	MOV	A,@R0		;RETRIEVE SEQNUM
+	MOV	R_SEQN,A	;STORE SEQNUM INTO R_SEQN
+
+;------------------
+	; RETRIEVE SELECTED DATA BYTE
+	mov	r0,#R_BUFF	;initialize pointer to comm IN BUFFER  
+	mov	a,#3		;point to first data element
+	clr	c
+	ADD	A,R_DATA
+	add	a,r0
+	mov	r0,a		;reset pointer
+	mov	A,@r0		;retrieve data byte
+	mov	R_DATA,A
+;------------------
+X_END:
+	clr	RIN		;disable reading data bus
+	CLR	HIN
+	POP	PSW		;RETURN TO PREVIOUS REG. BANK
+	RET
+;-----------------------------------------------------------------
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+GET_RADIO_STAT_SUB:
+
+	CALL	N_UART		;SET UP UART FOR DATA TRANSFER NOKIA BUS
+;-----------
+wait_act:
+	clr	hin
+	clr	hout
+	clr	rout
+	setb	Rin
+	CLR	RI
+;-----
+;	waitf1 ri, 1, NO_ACT
+;	jmp	wait_IL
+;---------
+;;
+
+	sleepy	120		;NEED TO WAIT ENOUGH TO AVOID INTERRUPTING ACK
+;	sleepy	250		;NEED TO WAIT ENOUGH TO AVOID INTERRUPTING ACK
+
+	jnb	ri,no_act	;no activity, (globals off or radio crashed)
+	jmp	wait_il		;activity, wait for global to sending messg.
+	
+;^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+;-------------- NO BUS ACTIVITY
+
+no_act:
+	clr	global			;reset globals flag
+get_status:
+	send_message 14h, trx,,0	;request status report
+	sleepy	100
+;--------------
+	;check here if error reported by send_message
+	MOV	A,F_ERROR	;retrieve error code from get_message
+	jz	ok_rcvd
+	cjne	a,#1,no_response
+
+	jmp	wait_act	;use this jump for compatibility when 
+				;only NOOP globals are on.
+;	jmp	no_act
+
+;--------------
+OK_RCVD:
+	mov	a,#08h			;check status
+	anl	a,r_data
+	jnz	no_response		;not on service
+	setb	service			;on service
+	mov	a,#20h			;check if voice channel (on call)
+	anl	a,r_data
+	jnz	voice_chan
+	clr	f_call			;not on call
+	jmp	exit_stat
+
+;--------------
+voice_chan:		
+	setb	f_call
+	jmp	exit_stat		;on call
+
+;--------------
+nok_rcvd:
+	cjne	a,#1,no_response	
+	jmp	no_act			;if checksum error, try again
+
+;--------------
+no_response:
+	clr	global			;if time out, reset flags and exit
+	clr	service
+	clr	f_call
+	jmp	exit_stat
+;--------------
+
+
+
+;^^^^^^^^^^^^^^^^^^^^^^^^
+;----------- BUS ACTIVITY
+
+WAIT_IL:	
+	CLR	RI
+	sleepy	10	;1 byte is 2 ms, need to wait more than that
+	JB	ri,WAIT_IL
+	
+	;there has been a silence after last packet, get next byte
+wait_gl:
+	wait_message trx, 1
+;	GET_MESSAGE trx, 1			;get data[1] (call status) into R_DATA
+;--------------
+	MOV	A,f_error		;retrieve error code from get_message
+	JZ	ok_message
+	cjne	a,#1,bad_message	
+	jmp	wait_il			;if checksum error, try again
+
+bad_message:
+	jmp	wait_act		;if time out, start all over
+
+;--------------
+ok_message:
+	;check if its a global or noop
+	MOV	A,R_TYPE
+	JZ	OK_NOOP			;it is a NOOP
+	clr	global
+	MOV	A,#7FH			;if not a global, wait again
+	CJNE	A,R_TYPE,wait_gl
+OK_GLOB:
+	setb	global	
+				;check here if "on call" and "on service"
+	mov	a,#20h
+	anl	a,r_data
+	jz	ok_service		;on service?
+	clr	service
+	clr	f_call
+	jmp	exit_stat
+
+ok_service:
+	setb	service	
+	mov	a,#80h
+	anl	a,r_data		;on call?
+	jnz	ok_call
+	clr	f_call
+	jmp	exit_stat	
+
+ok_call:
+	setb	f_call
+	jmp	exit_stat
+
+;---------------------------------
+OK_NOOP:
+	jmp	wait_act
+;;
+	jmp	get_status		;reuse request status routine from
+					;no-activity procedure
+;---------------------------------
+
+exit_stat:
+	clr	RIN
+	RET
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+
+SEND_MESSAGE_SUB:
+
+;calculate new sequence number
+
+	mov	a,r2		;backup current seqnumb in case of ACK error
+	mov	r1,a
+
+GET_SEQN:
+	INC	R2		;we assume R2 contains last seq numb
+	CJNE	R2,#32,E_SEQNUM
+	MOV	R2,#1		;seq num is max, initialize to 1
+E_SEQNUM:
+;...............
+;compare to global seq number
+	MOV	A,G_SEQN	;discard destination bits of global seqn
+	ANL	A,#1FH		
+	CLR	C
+	SUBB	A,R2
+	JZ	GET_SEQN	;SEQNUM should not be equal to last global
+;valid seqnumb is now stored in R2
+;...............
+	MOV	R0,#R_BUFF	;point to length
+	inc	r0		;point to type
+	inc	r0		;point to seqn
+;add destination to seqnumb
+	MOV	A,R2		;include destination address to SEQNUM
+	ORL	A,@R0		;retrieve destination from r_buff
+	MOV	@R0,A
+	INC	R0		;store complete sequence number + destination
+;-------------------------------------
+;-------------------------------------
+; store in R7 total packet length  (R4 + 4) that is in R_BUFF. 
+
+	MOV	A,R4
+	ADD	A,#3
+	mov	R7,A		;TOTAL PACKET LENGTH (chksum not counted)
+	INC	A		;length in ACC including checksum byte 
+
+	MOV	R0,#R_BUFF	;initialize pointer to packet length
+	orl	a,@r0		;store complete length+origin in buffer
+	MOV	@R0,A
+
+;---------------------------------
+;calculate checksum
+
+	MOV	R3,#0		;CLEAR PARTIAL CHECKSUM 
+N_CSUM:
+				; calculate checksum
+	MOV	A,@R0
+	ADD	A,R3
+	MOV	R3,A		;store partial sum
+	INC	R0
+	DJNZ	R7,N_CSUM	;r7 holds the total (R4 + 4) packet length
+	MOV	A,R3
+	MOV	@R0,A		;store checksum
+	
+;---------------------------------
+;SEND PACKET TO UART
+	CALL	N_UART		;SET UP UART FOR DATA TRANSFER NOKIA BUS
+
+;	clr	rin
+;	setb	Rout		;allow writing to nokia	
+
+	MOV	R0,#R_BUFF
+	clr	ti
+;.
+
+	mov	sbuf,@R0	;LENGTH + ORIGIN 
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,@R0	;TYPE
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,@R0	;SEQN
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	MOV	A,R4
+	JZ	ENDDATA		;NO DATA FOR THIS MESSAGE
+
+GETDATA:
+	mov	sbuf,@R0	;DATA
+	INC	R0
+	jnb	ti,$
+	clr	ti
+	DJNZ	R4,GETDATA
+ENDDATA:
+	mov	sbuf,@R0	;CHECK SUM
+	INC	R0
+	jnb	ti,$
+
+;disable interrupts to allow clearing RI before clock interrupt takes place
+;causing mistakenly erase this flag with a valid FIRST byte in the UART.
+;	clr	ea
+	clr	ti
+	CLR	RI		;put early before get_message to avoid 
+				;mising first byte from nokia.
+
+;	clr	Rout
+;	SETB	RIN		;ALLOW READING (DATA IN) FROM NOKIA BUS
+;	setb	ea
+
+;--------------------------------
+	; if sending a global (7fh) do not expect acknowlegment
+
+	mov	a,s_type
+	clr	c
+	subb	a,#7fh		; is TYPE a global?
+	jNZ	noskip		; if not, procede to wait for ack
+
+	mov	f_error, #0
+	jmp	good_ack	; YES, skip waiting for response
+
+noskip:
+	;missing origin argument in following command. set by send_message
+
+;--------------------------------
+	GET_MESSAGE 
+	clr	ea
+;--------------------------------
+
+skip_mesg:
+;--------------------------------
+
+	; check if get_message reported an error
+	jne	f_error, #0, ACK_ERR1	; exit with same error code reported
+
+	; check if received message type (R_TYPE) is correct.
+	MOV	A,R_TYPE	;MAKE SURE IS AN ACKNOWL (MSB = 1)
+	ANL	A,#80H
+	JZ	ACK_ERROR
+
+	; make sure is same message type
+	MOV	A,R_TYPE	
+	ANL	A,#7FH		;STRIP ACK BIT
+	CLR	C
+	SUBB	A,S_TYPE
+
+	JNZ	ACK_ERROR
+;--------------------------------
+;--------------------------------
+	; ALSO CHECK IF RECEIVED SEQ NUMB IS CORRECT
+	MOV	A,R_SEQN	;retrieve recv seq numb
+	ANL	A,#1FH		;strip destination code
+	clr	c
+	SUBB	A,R2		;compare recv with sent seq numb (in R2)
+
+;;;
+	;disable checking for correct sequence number
+	;the handset some times returns a diferent one
+;	JNZ	ACK_ERROR
+;--------------------------------
+	mov	f_error, #0		;clear error flag
+	JMP	GOOD_ACK
+
+
+
+;-------------------------------
+ACK_ERROR:			;error routine
+;;
+	mov	f_error,#1		;set error flag
+ack_err1:
+	INC	R1			;increment sequence number
+	CJNE	R1,#32,NO_PROBLEM_BABY
+	MOV	R1,#1
+
+NO_PROBLEM_BABY:
+	mov	a,r1		;retrieve previous seq numb INC BY 1
+	MOV	R2,A
+
+;;;
+	; wait a little before repeating same message checking for 
+	; activity in the bus
+;	setb	RIN
+;	CLR	RI
+;	s_waitf1	ri, 10, x_done1
+;	jmp	no_problem_baby
+;x_done1:
+
+;--------------------------------
+GOOD_ACK:
+;	setb	ea
+	RET
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+POWER_ON_SUB:
+
+
+
+;SEND PACKET TO UART
+	CALL	N_UART		;SET UP UART FOR DATA TRANSFER NOKIA BUS
+
+	clr	rin
+	clr	hin
+	clr	hout
+	setb	Rout		;allow writing to nokia	
+
+	clr	ti
+	clr	ea
+
+	mov	sbuf,#05H	;LENGTH + ORIGIN 
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#42H	;TYPE
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#0E1H	;SEQN
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#01H	;DATA
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+
+	mov	sbuf,#29H	;CHECK SUM
+	jnb	ti,$
+
+;disable interrupts to allow clearing RI before clock interrupt takes place
+;causing to mistakenly erase this flag with a valid FIRST byte in the UART.
+;never mind, I don't know what the hell that means either...
+;	clr	ea
+	clr	ti
+	CLR	RI		;put early before get_message to avoid 
+				;mising first byte from nokia.
+
+	clr	Rout
+	setb	ea
+
+	RET
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+POWER_OFF_SUB:
+
+
+
+;SEND PACKET TO UART
+	WAIT_GLOBAL
+
+	CALL	N_UART		;SET UP UART FOR DATA TRANSFER NOKIA BUS
+
+	clr	rin
+	setb	Rout		;allow writing to nokia	
+;;;;;;
+	clr	ea		;disable interrupts to avoid corrupt message
+	clr	ti
+
+	mov	sbuf,#05H	;LENGTH + ORIGIN 
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#19H	;TYPE
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#28H	;SEQN
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#00H	;DATA
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#46H	;CHECK SUM
+	jnb	ti,$
+
+	clr	Rout
+	setb	ea
+	
+	GET_MESSAGE TRX
+
+	CALL	N_UART		;SET UP UART FOR DATA TRANSFER NOKIA BUS
+	clr	rin
+	setb	Rout		;allow writing to nokia	
+
+	clr	ea		;disable interrupts to avoid corrupt message
+	clr	ti
+
+	mov	sbuf,#05H	;LENGTH + ORIGIN 
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#42H	;TYPE
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#25H	;SEQN
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#00H	;DATA
+	INC	R0
+	jnb	ti,$
+	clr	ti
+
+	mov	sbuf,#6CH	;CHECK SUM
+	jnb	ti,$
+
+	clr	Rout
+	
+	GET_MESSAGE TRX
+
+	setb	ea
+
+
+	RET
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------

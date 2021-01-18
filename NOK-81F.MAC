@@ -1,0 +1,324 @@
+;-----------------------------------------------------------------
+GET_MESSAGE %MACRO	ORIGIN, XBYTE
+;-----------------------------------------------------------------
+;SINTAX: 	GET_MESSAGE source device, databyte_number
+
+;this routine reads the data bus and places the data in r_buff
+;reading is immediate. This routine can only be used in the following cases:
+;	1)	right after a "WAIT_GLOBAL" command
+;	2)	anytime between a "STOP_GLOBALS" and "START_GLOBALS"
+;	3)	right after a "SEND_MESSAGE" (this is done automatically)
+;if used any other time it may give incorrect results since it would not know
+;the begining of the data packet
+
+;verifies if received length is within 4 to 20 bytes. Gives an error otherwise
+;verifies if received checksum is correct. Error otherwise.
+;stores message type in variable R_TYPE for acknowledgement error detection 
+;stores a selected byte from received data and stores it to R_DATA
+;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	%IFNB	ORIGIN
+	%IF	ORIGIN EQ HSET
+	setb	bus_way	
+	%ELSE
+	clr	bus_way
+	%ENDIF
+	%ENDIF		;if parameter not specified, do not change bus_way
+
+
+
+	%IFNB XBYTE		;store in R_DATA data byte specified by XBYTE;
+	MOV	R_DATA,#XBYTE
+	%ELSE
+;	MOV	R_DATA,R6	;default retrieve FROM R6
+	MOV	R_DATA,#99	;default retrieve FROM R6
+	%ENDIF
+
+
+
+	setb	bypass		;cleared by send_message 7fh
+	clr	ie.1
+	CALL	GET_MESSAGE_SUB
+	setb	ie.1
+	setb	ea
+
+	%ENDM
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+
+
+;-----------------------------------------------------------------
+GET_BYTE %MACRO XBYTE
+;routine to retrieve a SPECIFIC BYTE from r_buff FROM 0 TO 19
+
+;put this inside restore_globals
+	%IFNB XBYTE
+
+	PUSH	ACC
+	PUSH	PSW
+
+;REGISTER BANK 2, RS0=0, RS1=1			MODEM/DTMF | BUS READ
+	clr	rs0
+	setb	rs1
+	
+	mov	r0,#R_BUFF	;initialize pointer to comm IN BUFFER  
+	mov	A,#XBYTE
+	clr	c
+	add	a,r0
+	mov	r0,a		;reset pointer
+	mov	A,@r0		;retrieve data byte
+	MOV	R_DATA,A
+
+	POP	PSW		;RETURN TO PREVIOUS REG. BANK
+	POP	ACC
+	%ENDIF
+
+	%ENDM
+
+;-----------------------------------------------------------------
+WAIT_GLOBAL	%MACRO
+	%GENSYM	OK_EXIT
+;;;
+;do not use inside a subrutine since it may branch before RET
+
+;	1) sets UART to talk to nokia bus, 
+;	2) waits for a silence in the data bus
+;	3) invoques GET_MESSAGE until a global has been received
+;	4) sets Call Status Flag
+;	5) GET_MESSAGE has also updated the Sequence Number
+	
+	CALL WAIT_GLOBAL_SUB
+;	mov	a,f_error	;not needed all this ??
+;	jz	ok_exit
+;	jmp	wait_service
+
+ok_exit:
+	%ENDM
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+START_GLOBALS	%MACRO
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+
+	call	start_globals_sub
+
+	%ENDM
+;-----------------------------------------------------------------
+
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+STOP_GLOBALS	%MACRO
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+
+	call	stop_globals_sub
+
+	%ENDM
+;-----------------------------------------------------------------
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+SEND_MESSAGE	%MACRO	TYP, DEST, DATA, YBYTE
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+	%GENSYM	START_SEND, GET_IN, GET_OUT
+
+;SINTAX:
+;	SEND_MESSAGE message_type, destination, <data1,..., datan>, databyte
+;message_type:	any of the nokia protocol codes
+;destination:	TRX for radio, HSET for handset
+;data1 - 16:	1 to 16 data bytes specified by the message type
+;databyte:	1 to 16. a selected byte from received acknowledg. 
+;		to be stored in R_DATA.
+;R_TYPE will contain the received data type for error detection puposes
+;this macro also calls GET_MESSAGE to verify that acknowledgment is correct
+	
+	clr	ie.1	;to avoid corrupt messages by other interrupts
+	push	psw
+	push	acc
+	clr	rs0		;set register bank 2
+	setb	rs1
+;;
+	setb	bypass
+;	clr	bypass
+	clr	hin
+	clr	hout
+	CLR	ROUT
+	clr	RIN		;disable READING (DATA IN) FROM NOKIA BUS
+
+	mov	REPEAT,#2
+
+START_SEND:
+
+	MOV	R4,#0		;counter data bytes
+	MOV	S_TYPE,#TYP	;store message type for error detection
+	MOV	R0,#R_BUFF	;initialize packet storage pointer
+
+	%IFNB	YBYTE		;store selected data byte pointer in R6
+	MOV	R6,#YBYTE	;to be used by GET_MESSAGE
+	%ELSE
+	MOV	R6,#0
+	%ENDIF
+
+	%IF	DEST EQ TRX	;DEDUCE ORIGIN FROM DESTINATION
+	MOV	@R0,#HSET	;add origin address and store length packet
+;;;
+	setb	rout		;route messages to radio	
+	clr	BUS_WAY		;set direction to radio for get_message
+
+	%ELSE
+	%IF	DEST EQ HSET
+	MOV	@R0,#TRX	;add origin address and store length packet
+;;;
+	setb	hout		;route messages to handset
+	setb	bus_way		;set direction to hset for get_message
+	
+	%ELSE
+
+;;;;@@@@@@@@@@@@@@
+	MOV	@R0, #GLOB
+	setb	BUS_WAY		;set direction to hset for get_message
+;	clr	bypass
+	setb	hout
+
+	%ENDIF
+	%ENDIF
+
+	INC	R0		;advance pointer to message type
+	MOV	@R0,#TYP	;store msg type
+
+	INC	R0		;point to SEQNUMB
+	MOV	@R0, #DEST	;store destination in r_buff
+
+	INC	R0		;point to first data byte
+;-------------------------------------
+;store data elements
+
+	%IFNB	<DATA>
+		%FOR K IN  DATA		;grab each byte from <DATA> and
+
+;add here a check for a max data of 16	
+
+			%IF K EQ 999
+				MOV A,R_DATA
+				MOV @R0,A
+			%ELSE
+				%if K eq 555
+					mov r4, #6
+				%else
+					;store them in succesive R_BUFF places
+					MOV	@R0,#K	
+				%endif
+			%ENDIF
+
+			INC	R0		;pointer to next R_BUFF byte
+			INC	R4		;counter for total DATA bytes
+		%ENDFOR
+	%ENDIF
+
+;-------------------------------------
+	CALL	SEND_MESSAGE_SUB
+	clr	ie.1
+;-------------------------------------
+
+;if acknowledgment error, retransmit packet
+	djnz	REPEAT,get_in
+	jmp	get_out
+
+get_in:
+	jeq	f_error, #0, get_out
+	sleepy	20
+	jmp	start_send
+	
+;	cjne	r5,#0,START_SEND
+
+get_out:
+	setb	ie.1
+	setb	ea
+	setb	bypass
+	pop	acc
+	pop	psw
+	%ENDM
+;-----------------------------------------------------------------
+;-----------------------------------------------------
+;*****************
+;**  PUT_DTMF_N **
+;*****************
+
+;Grabs $-TERMINATED digit string starting at offset S_OFFSET 
+;and sends a DTMF tone for each digit
+
+PUT_DTMF_N	%MACRO	s_offset
+	%GENSYM	loop, keepon, p_exit, send_tone
+
+	PUSH	ACC
+	PUSH	PSW
+	CLR	RS0	;SET REG BANK 0
+	clr	RS1
+
+	mov	r0,#s_offset
+loop:
+	mov	a,@r0
+	cjne	a,#"$",keepon
+	jmp	p_exit
+	
+keepon:
+;---------------------------------------------------
+
+;;;
+; MAKE SURE DTMF IN NOKIA IS THE RIGTH TONE
+;THIS IS WRONG
+
+;	ANL	A,#0FH		;ELIMINATE ASCII CODE FOR DIGITS
+	
+send_tone:
+	MOV	R_DATA,A	;SEND_MESSAGE WILL SEND R_DATA BYTE
+	send_message	5, trx, <XBYTE>
+;	SLEEPY	10
+	SEND_MESSAGE	6, TRX	;KEY RELEASE
+	SLEEPY	200
+
+;---------------------------------------------------
+	inc	r0
+	jmp	loop
+p_exit:
+	POP	PSW
+	POP	ACC
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;-----------------------------------------------------
+;-----------------------------------------------------
+;***********************
+;**  GET_RADIO_STAT **
+;***********************
+
+;CHECKS ACTIVITY IN DATA BUS AND SETS OR RESETS FLAGS (SERVICE, GLOBAL, CALL)
+
+GET_RADIO_STAT	%MACRO	
+	%GENSYM 
+
+	CALL	GET_RADIO_STAT_SUB
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;-----------------------------------------------------
+;-----------------------------------------------------
+WAIT_MESSAGE	%MACRO	ORIGIN, XBYTE
+	%GENSYM wait_here, exit_loop
+
+	mov	z_loop, #20
+
+wait_here:
+	get_message	origin, xbyte
+	jeq	f_error, #0, exit_loop
+	djnz	z_loop, wait_here
+exit_loop:
+
+	%ENDM

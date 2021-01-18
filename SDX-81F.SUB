@@ -1,0 +1,839 @@
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+SLEEPY_SUB:
+
+	MOV	R5,#0FFH
+LOOPZ	
+	DJNZ	R5,$
+	DJNZ	R6,LOOPZ
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+SLEEP_SUB:
+
+	MOV	R5,#0FFH
+	MOV	R6,#0FFH
+LOOPY:	
+	DJNZ	R5,$
+	DJNZ	R6,LOOPY
+	DJNZ	R7,LOOPY
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+GET_ACK:
+;GET ACKNOWLEGMENT FROM GATEWAY. SET ACK_FLAG IF RECEIVED
+
+	CLR	ACK_FLAG
+
+	mov	dptr,#6000h	;address control register 0
+	mov	a,#19h		;DISABLE transmit 
+	movx	@dptr,a
+
+	mov	dptr,#6001h	;address control register 1
+	mov	a,#00h		;disable interrupts to uC
+	movx	@dptr,a
+
+	mov	dptr,#6003h	
+	mov	a,#0		;DISABLE DTMF, ENABLE RXD
+	movx	@dptr,a
+
+
+ANS_TONE:
+	mov	dptr,#6002h	;check for answering tone
+	movx	a,@dptr
+
+	jnb	acc.2,NO_ANS
+	SETB	ACK_FLAG
+
+DISABLE_MODEM:
+	mov	dptr,#6003h	;no dtmf tones, DISable RXD
+	mov	a,#10h
+	movx	@dptr,a
+NO_ANS:	
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+GET_ACK_INT:
+;prepare modem interrupt
+
+;GET ACKNOWLEGMENT FROM GATEWAY. SET ACK_FLAG IF RECEIVED
+
+	CLR	ACK_FLAG
+
+	mov	dptr,#6000h	;address control register 0
+	mov	a,#19h		;DISABLE transmit 
+	movx	@dptr,a
+;;
+	; enable interrupts of modem and uC
+	setb	ea		;enable uC interrupts
+	setb	it1		;set int1 to negative edge trigger
+
+
+	mov	dptr,#6001h	;address control register 1
+	mov	a,#20h		;enable interrupts to uC
+	movx	@dptr,a
+
+	mov	dptr,#6003h	
+	mov	a,#0		;DISABLE DTMF, ENABLE RXD
+	movx	@dptr,a
+	RET
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+CARD_CSUM:
+	push	psw
+	setb	rs0		;bank 1, card reader
+	clr	rs1
+	mov	r1,#c_sum
+	mov	a,#0
+	MOV	R7,#0
+
+	mov	r0,#c_ID
+	call	check_sum
+
+	mov	r0,#c_TIME
+	call	check_sum
+
+	mov	r0,#c_seqn
+	call	check_sum
+
+	mov	r0,#c_EXPD
+	call	check_sum
+
+	mov	r0,#c_NUMB
+	call	check_sum
+
+;R7  has now the sum
+	mov	A,R7
+	swap	a
+	ANL	A,#0FH
+	mov	r3,a
+	MOV	A,R7
+	anl	A,#0fh
+	MOV	R2,A
+
+	MOV	A,R3
+	MOV	@R1,A
+	inc	r1
+
+	MOV	A,R2
+	MOV	@R1,A
+	inc	r1
+	mov	@r1,#"$"
+
+	POP	PSW
+	ret
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+CHECK_SUM:
+;STORE PARTIAL IN R7
+	MOV	A,@R0
+	ANL	A,#0FH
+
+	call	test09
+
+	CJNE	A,#0,CHECK_END
+	MOV	A,#10H
+	clr	c
+	ADD	A,R7
+	DA	A
+	MOV	R7,A
+	INC	R0
+	JMP	CHECK_SUM
+
+CHECK_END:
+	CJNE	@R0,#"$",ADD_DIGIT
+	JMP	CSUM_END
+
+ADD_DIGIT:
+	clr	c
+	ADD	A,R7
+	DA	A
+	MOV	R7,A
+	INC	R0
+	JMP	CHECK_SUM
+
+CSUM_END:
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+D_CSUM:
+	push	psw
+	setb	rs0		;bank 1, card reader
+	clr	rs1
+	mov	r1,#c_sum
+	mov	a,#0
+	MOV	R7,#0
+
+	mov	r0,#c_ID
+	call	check_sum
+
+	mov	r0,#c_TIME
+	call	check_sum
+
+	mov	r0,#c_seqn
+	call	check_sum
+
+	mov	r0,#c_EXPD
+	call	check_sum
+
+
+;R7  has now the sum
+	mov	A,R7
+	swap	a
+	ANL	A,#0FH
+	mov	r3,a
+	MOV	A,R7
+	anl	A,#0fh
+	MOV	R2,A
+
+	MOV	A,R3
+	MOV	@R1,A
+	inc	r1
+
+	MOV	A,R2
+	MOV	@R1,A
+	inc	r1
+	mov	@r1,#"$"
+
+	POP	PSW
+	ret
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+CHECK_SUM1:
+;STORE PARTIAL IN R7
+	MOV	A,@R0
+	ANL	A,#0FH
+	CJNE	A,#0,CHECK_END1
+	MOV	A,#10H
+	ADD	A,R7
+	DA	A
+	MOV	R7,A
+	INC	R0
+	JMP	CHECK_SUM1
+
+CHECK_END1:
+	CJNE	@R0,#"$",ADD_DIGIT1
+	JMP	CSUM_END1
+
+ADD_DIGIT1:
+	ADD	A,R7
+	DA	A
+	MOV	R7,A
+	INC	R0
+	JMP	CHECK_SUM1
+
+CSUM_END1:
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+CARD:
+;this routine blocks ALL interrupts while active.
+;needed to return to register bank 0 before exiting
+;the VALID flag is cleared by INIT_CARD macro.
+
+;TEMP		R4	TEMPORARY REGISTER
+;COUNTER	R5	if cardno is > 20 digits: error
+;BIT_T		R6	TEMPORARY STORAGE RECEIVED BITS
+;BIT_C		R7	RECEIVED BIT COUNTER
+;RAW_C		RAM OFFSET BYTE STORAGE
+
+;	clr	ea
+
+	push	psw	;to save register bank selection rs0, rs1
+	push	acc
+	setb	RS0		;SET REG BANK 1
+	CLR	RS1
+
+	JNB	TEST1,XYZ1
+	JMP	FINITO		;lock card data until sent to gateway
+XYZ1:
+	jb	S_FLAG,ok_read	;card is being read already
+
+;;	jnb	c_data,XYZ2	
+	jb	c_data,XYZ2	
+	JMP	FINITO		;do nothing until start bit received
+
+XYZ2:
+	mov	r0,#RAW_C	;initial offset FOR RAW card number
+	MOV	BIT_T,#0	;INITIALIZE STORAGE RECEIVED CARD BITS
+	MOV	BIT_C,#5	;INITIALIZE CARD BYTE COUNTER
+
+	SETB	S_FLAG		;THIS IS THE FIRST "1" DETECTED
+	setb	s_card		;acknowledge card being read
+
+ok_read:
+	MOV	A,BIT_T
+	MOV	C,C_DATA
+;;	cpl	c		;card reader uses negative logic
+	RRC	A
+	DJNZ	BIT_C,end_c1	;COUNT FIVE BITS
+	jmp	end_c2
+
+end_c1:
+	jmp	end_c
+
+end_c2:
+
+
+	;NOW CHARACTER IS COMPLETE
+	clr	C		;discard parity bit for now
+	RLC	A
+	SWAP	A		;convert to ascii
+	ANL	A,#0FH
+	ADD	A,#30H	
+
+	cjne	a,#3fh,not_end	;IF END SENTINEL (?) ADD ($) 
+	mov	a,#24h		;add $ to end of string
+	mov	@r0,a		;starting offset of card number string
+	SETB	TEST1		;END OF CARD. PROCEED TO CHECK NUMBER
+
+not_end:
+	mov	@r0,a		;starting offset of card number string
+	inc	r0		;increment pointer for storing next digit
+	MOV	BIT_T,#0	;CLEAR TEMPORARY STORAGE
+	MOV	BIT_C,#5
+	CLR	A
+	
+	jnb	TEST1,end_c3	;CARD # NOT extracted YET IF TEST1=0
+	jmp	end_c4
+
+end_c3:
+	jmp	end_c
+
+end_c4:
+	clr	s_flag		;wait for next card
+	MOV	BIT_T,#0	;CLEAR TEMPORARY STORAGE
+	MOV	BIT_C,#5
+	CLR	A
+;---------------------------------------------------
+;transfer card number from RAW_C to C_NUMB
+	MOV	R0,#RAW_C
+	MOV	R1,#C_NUMB
+	MOV	R5,#0			;clear cardno digits counter
+
+	cjne	@r0,#3bH,bad_card	;make sure we got the start sentinel
+	inc	r0
+GET_NUMB:
+	MOV	A,@R0
+	CJNE	A,#3DH,GET_NEXT		;IF (=) END OF CARD NUMBER
+	MOV	@R1,#24H		;$ ADD END STRING
+	JMP	DATE_INPUT
+
+GET_NEXT:
+;;
+	TEST_NUM		;TEST IF VALUE IN ACC IS A NUMBER (0 --> 9)
+				;WILL SET "VALID" BIT IF NOT A NUMBER or "$"
+	MOV	@R1,A
+	INC	R0
+	INC	R1
+	inc	r5
+	cjne	r5,#21,CK_END	;limit card number to 20 digits
+	jmp	bad_card		;card is invalid. too many digits
+CK_END:
+	cjne	a,#24h,get_numb	;make sure we are not at the end of string $
+
+;at this point card is not a credit card (or ATM) because there is not = date
+;separator
+	SETB	VALID	;BAD CARD
+
+
+DATE_INPUT:
+;transfer 4 CHARACTERS exp date from RAW_C to C_EXPD
+	mov	r1,#c_expd
+	mov	r3,#5		;just get 4 digits
+	INC	R0
+GET_DATE:
+	MOV	A,@R0
+	DJNZ	R3,NEXT_DATE	
+	MOV	@R1,#24H	;$ ADD END STRING
+	JMP	END_C
+;-----------------------
+
+NEXT_date:
+	MOV	@R1,A
+	TEST_NUM		;TEST IF VALUE IN ACC IS A NUMBER (0 --> 9)
+				;WILL SET "VALID" BIT IF NOT A NUMBER
+	INC	R0
+	INC	R1
+	JMP	GET_DATE
+
+;-----------------------
+bad_card:
+	SETB	VALID		;VALID=1, BAD CARD, START AGAIN
+	CLR	S_FLAG
+	SETB	TEST1
+	JMP	END_C
+
+;-----------------------
+END_C:
+	MOV	BIT_T,A		;store partial bits of current digit
+finito:
+	CLR	0C8H.6		;CLEAR INTERRUPT FLAG (CARD STROBE)
+
+	pop	acc
+	pop	psw		;retrieve selected register bank
+
+	setb	ea
+
+	RETI
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+SDMODE:
+;set UART for CONTROLLER at 4800 BPS
+;using timer 1 as baud rate generator
+
+	CLR	IE.3			;DISABLE TIMER 1 INTERRUPT
+	clr	tr1		;stop timer for reload
+	MOV	PCON,#0		;INITIALIZE SMOD0 & SMOD1 FOR SER. PORT
+
+
+	mov	scon,#01010011b		;SERIAL MODE 1, 8 BITS, 
+
+	mov	a,tmod
+	clr	acc.4
+	setb	acc.5
+	clr	acc.6
+	clr	acc.7
+	mov	tmod,a
+
+
+	mov	th1,#0fAh		;4800 bps
+	setb	tr1
+;;	SETB	RIN			;allow reading data bus
+;;	CLR	ROUT			;do not write to data bus
+	RET
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+N_UART:
+;set UART for CONTROLLER at 4800 BPS
+;using timer 1 as baud rate generator
+
+	CLR	IE.3			;DISABLE TIMER 1 INTERRUPT
+	clr	tr1		;stop timer for reload
+	MOV	PCON,#0		;INITIALIZE SMOD0 & SMOD1 FOR SER. PORT
+
+
+	mov	scon,#01010011b		;SERIAL MODE 1, 8 BITS, 
+
+	mov	a,tmod
+	clr	acc.4
+	setb	acc.5
+	clr	acc.6
+	clr	acc.7
+	mov	tmod,a
+
+
+	mov	th1,#0fAh		;4800 bps
+	setb	tr1
+;;	CLR	RIN			;DISABLE READ OR WRITE NOKIA DATA BUS
+;;	CLR	ROUT			
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;;;
+time_e:
+	push	psw
+	push	acc		;may not be necesary, but who knows!
+
+	setb	RS0		;SET REG BANK 3
+	setb	RS1
+
+	
+
+	;--------------------------------------
+
+	INC	R2		;PRESCALER, DIVIDE BY 4
+	CJNE	R2,#4,LEAVE1
+	jmp	leave2
+
+leave1:
+	jmp	leave
+
+leave2:
+	MOV	R2,#0
+
+;1 ms Tic
+	inc	time6
+
+	
+
+	inc	r0		;divide by 250
+	cjne	r0,#0e9h,leave1	;check these numbers
+	mov	r0,#0		;FOR 1 milisecond tic
+
+	inc	r1		;divide by 4 (4*250 = 1000 ms = 1sec)
+	cjne	r1,#04h,leave1	
+	mov	r1,#0
+
+;1 sec Tic
+	;update general purpose timers
+	inc	time0		; watchdog for power off (6 sec)
+	inc	time1		; watchdog not in slide card (32 sec)
+;	inc	time2
+;	inc	time3
+;	inc	time4
+;	inc	time5
+	;time6 is used somewhere else
+	inc	time7
+
+
+	;------------------------
+	; EXECUTE EVERY SECOND
+	;------------------------
+	;--------------------------------------
+	; test watchdog / power on
+	;--------------------------------------
+
+;	jmp	cont1		; just test to bypass watchdog
+
+
+	jmpb	ready, 1, cont1		; if ready, ignore watch dog
+	mov	a, time1
+	anl	a, #0e0h		; a count 32sec or larger will reset
+	jz	cont2
+
+	mov	time1, #0		; reset counter
+	mov	ccapm4, #48h		; watchdog mode for pca module 4
+	mov	ccon, #40h		; start pca counter
+	mov	cmod, #40h		; enable watchdog function
+
+cont1:
+	mov	time1, #0
+cont2:
+	;------------------------
+	;------------------------
+	; timer condition block
+	;------------------------
+
+
+
+
+;increment master clock
+	inc	r3		;units
+	cjne	r3,#10,leave
+	mov	r3,#0
+
+	inc	r4		;tenths
+	cjne	r4,#10,leave
+	mov	r4,#0
+
+	inc	r5		;hundreds
+	cjne	r5,#10,leave
+	mov	r5,#0
+
+	inc	r6		;thousands
+	cjne	r6,#10,leave
+	mov	r6,#0
+
+	inc	r7		;tents of thousands
+	cjne	r7,#10,leave
+	mov	r7,#0
+
+LEAVE:
+	pop	acc
+	pop	psw	
+	RETI
+
+
+
+;-----------------------------------------------------
+;-----------------------------------------------------
+;-----------------------------------------------------
+;-----------------------------------------------------
+RESET_CLOCK:
+;reset system clock
+
+;THIS ROUTINE IS INEXACT BECAUSE IT HAS TO RESET ALSO 
+;THE PRESCALER. THERE WILL BE A MAX ERROR OF 1 S
+;	CLR	EA
+	push	psw
+	setb	rs0		;select clock register bank
+	setb	rs1
+
+	mov	r3,#0
+	mov	r4,#0
+	mov	r5,#0
+	mov	r6,#0
+	mov	r7,#0
+
+	pop	psw
+	SETB	EA
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+SAVE_CLOCK:
+;	CLR	EA
+	push	psw
+	clr	rs0		;select register bank
+	clr	rs1
+	
+;	MOV	A,R0		;STORE CURRENT VALUE OF TICM COUNTER
+;	PUSH	Acc		;register R0 NEEDED FOR INDIRECT ADDRESING
+
+
+;increment master clock
+
+
+	MOV	R0,#C_TIME	;STARTING ADDRESS OF CLOCK STORAGE
+	mov	dptr,#0c000h
+
+	MOV	A,ck_10k
+	ADD	A,#30H
+	MOV	@R0,A
+	movX	@dptr,a
+	sleepy	15
+	inc	dptr
+	INC	R0
+
+
+	MOV	A,ck_1k
+	ADD	A,#30H
+	MOV	@R0,A
+	movX	@dptr,a
+	sleepy	15
+	inc	dptr
+	INC	R0
+
+	MOV	A,ck_100
+	ADD	A,#30H
+	MOV	@R0,A
+	movX	@dptr,a
+	sleepy	15
+	inc	dptr
+	INC	R0
+
+	MOV	A,ck_10
+	ADD	A,#30H
+	MOV	@R0,A
+	movX	@dptr,a
+	sleepy	15
+	inc	dptr
+	INC	R0
+
+	MOV	A,ck_1
+	ADD	A,#30H
+	MOV	@R0,A
+	movX	@dptr,a
+	sleepy	15
+	inc	dptr
+	INC	R0
+
+
+	MOV	A,#24H		;$ END OF STRING
+	MOV	@R0,A
+	movX	@dptr,a
+	sleepy	15
+
+;???
+;	POP	Acc
+
+;	MOV	R0,A		;RESTORE VALUE OF TICM COUNTER
+
+	pop	psw
+	SETB	EA
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+GET_CLOCK:
+;	CLR	EA
+	push	psw
+	setb	rs0		;select clock register bank
+	setb	rs1
+	
+
+;check if RAM contains a valid string by checking if 6th location
+;holds the end of string "$"
+	mov	DPTR,#0c005h
+	MOVX	A,@DPTR
+	CJNE	A,#"$",NEW_RAM
+	JMP	GET_LAST_TIME
+
+NEW_RAM:
+;PUT TIME=00000 in variable C_TIME for initial handshake
+	GET_DMB		C_TIME, X_TIME		
+	JMP	SAVE_DONE
+
+
+
+
+GET_LAST_TIME:
+	MOV	R0,#C_TIME	;STARTING ADDRESS OF TIME STORAGE
+	mov	DPTR,#0c000h	;TIME start addr IN external ram 
+
+	MOV	R2,#6
+SAVE_6:
+	MOVX	A,@DPTR		;
+	MOV	@R0,A
+
+;`````````````````````````
+;test if number is between 0 and 9, to avoid checksum problem
+	anl	a,#0fh
+	cjne	a,#9,greatr9	;if not 9 check greater than 9
+	jmp	good_numb
+greatr9:
+	anl	a,#08h		;check if msb is set ==> not a numeric value
+	jz	good_numb
+	mov	@r0,#30h	;store a guessed number
+good_numb:
+;`````````````````````````
+
+	INC	R0
+	INC	DPTR
+	DJNZ	R2, SAVE_6
+
+SAVE_DONE:
+
+	pop	psw
+	SETB	EA
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+GET_C_SEQN:
+;	CLR	EA
+	push	psw
+	CLR	rs0		
+	CLR	rs1
+
+;-----------
+;;
+;	jmp	new_ram1
+
+;check if RAM contains valid string by checking if IT Holds end of string "$"
+	mov	DPTR,#0c006h		;external ram location for c_seqn
+	inc	dptr
+	MOVX	A,@DPTR
+	CJNE	A,#"$",NEW_RAM1
+	JMP	GET_LAST_SEQN
+
+NEW_RAM1:
+;PUT SEQN=0 in variable C_SEQN for initial handshake of the eeprom
+	mov	r0,#c_seqn
+	mov	@r0,#0			;initial value
+	inc	r0
+	mov	@r0,#"$"		;end of string
+	
+;	JMP	SAVE_DONE1
+
+GET_LAST_SEQN:
+	MOV	R0,#C_seqn	;indirect internal ram  ADDRESS for seqn
+	mov	DPTR,#0c006h	;external ram address for seqn
+	MOVX	A,@DPTR		;
+	call	test09
+	MOV	@R0,A
+	inc	r0
+	mov	@r0,#"$"		;end of string
+
+SAVE_DONE1:
+	pop	psw
+	SETB	EA
+	RET
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+TEST09:
+;test if THE value in the acumulator is a number between 0 and 9
+;to avoid checksum problem
+;CONVERT TO ZERO OTHERWISE This is wrong because is changing the number
+; try to use instead TEST_NUM in SDX.MAC
+
+	PUSH	acc		;save original value to check
+	anl	a,#0fh
+	cjne	a,#9,is_eight	;if not 9 check if 8
+	pop	acc		;if 9, good number, exit
+	jmp	exit_test09
+
+is_eight:
+	cjne	a,#8,less_eight
+	pop	acc		;if eight, good, exit
+	jmp	exit_test09
+
+less_eight:
+	anl	a,#08h		;check if msb is set ==> not a numeric value
+	jz	good_numbY
+	pop	acc		;discard previous value, BAD NUMBER
+	mov	a,#0		;convert to zero
+	jmp	exit_test09
+
+good_numbY:
+	POP	ACC
+exit_test09:
+	ret
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------

@@ -1,0 +1,502 @@
+; original code is in file TEST-NUM
+;-----------------------------------------------------
+;-----------------------------------------------------------------
+
+
+;****************
+;**  TEST_NUM  **
+;****************
+TEST_NUM	%MACRO
+	%GENSYM	vvv, is_eightx, less_eightx, good_numbyx
+;WILL SET THE INVALID CARD FLAG IF current byte in accumulator
+;IS NOT BETWEEN 0 - 9 or the end-of-string "$"
+
+	PUSH	acc		;save original value to check
+
+	cjne	a, #24h, vvv
+	jmp	good_numbyx
+
+vvv:
+	anl	a,#0fh
+	cjne	a,#9,is_eightx	;if not 9 check if 8
+	jmp	good_numbyx
+
+is_eightx:
+	cjne	a,#8,less_eightx
+	jmp	good_numbyx
+
+less_eightx:
+	anl	a,#08h		;check if msb is set ==> not a numeric value
+	jz	good_numbYx
+	setb	valid
+good_numbYx:
+	POP	ACC
+	%endm
+;-----------------------------------------------------------------
+;-----------------------------------------------------
+;-----------------------------------------------------
+;*****************
+;**  INIT_CARD  **
+;*****************
+;this macro prepares all the flags to read again a credit card
+INIT_CARD	%MACRO
+	CLR	VALID
+	CLR	S_FLAG
+	CLR	TEST1
+	CLR	0C8H.6		;CLEAR INTERRUPT FLAG
+	SETB	IE.5		;interrupt that jumps to CARD.SUB
+		%ENDM
+;-----------------------------------------------------
+;**************
+;**  SLEEP  **
+;**************
+SLEEP	%MACRO	TIME
+
+	PUSH	PSW
+	CLR	RS0	;SET REG BANK 0
+	CLR	RS1
+
+	MOV	R7,#TIME
+	CALL SLEEP_SUB
+	POP	PSW
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;**************
+;**  SLEEPY  **
+;**************
+SLEEPY	%MACRO	TIME
+
+	push	psw
+	CLR	RS0	;SET REG BANK 0
+	CLR	RS1
+
+	MOV	R6,#TIME
+	CALL SLEEPY_SUB
+	pop	psw
+	%ENDM
+;-----------------------------------------------------
+;---------------------------------------------------
+;********************
+;**  ENABLE_TONES  **
+;********************
+ENABLE_TONES	%MACRO	
+
+	mov	dptr,#6000h	;address control register 0
+	mov	a,#1Bh		;enable transmit @ 10 bits 1-8-1
+	movx	@dptr,a
+
+	mov	dptr,#6001h	;address control register 2
+	mov	a,#00h		;normal transmit
+	movx	@dptr,a
+
+	%ENDM
+
+;---------------------------------------------------
+;---------------------------------------------------
+;***************
+;**  TONE     **
+;***************
+TONE	%MACRO	DTMF, PAUSE
+;generates a dtmf tone for the digit-code represented by DTMF
+;according to the digit codes of the modem chip
+;if any character is given in the second argument PAUSE, an extended
+;first tone will be given to assure a proper interrupt of voice prompts
+
+	mov	dptr,#6003h	;dtmf tones, DISAble RXD
+	%IFNB	<DTMF>		;if dtmf not given, use value in ACC
+	mov	a,#dtmf
+	%ENDIF
+
+
+	orl	a,#10h		;set bit to enable DTMF
+	movx	@dptr,a		
+
+	;SEND REQUESTED DTMF
+	mov	dptr,#6000h	;address control register 0
+	mov	a,#1Bh		;enable transmit @ 10 bits 1-8-1
+	movx	@dptr,a
+;---------------------------------------------------
+	%IFNB	<PAUSE>		;if pause given, increase time of tone
+	SLEEPY	0FFH
+	%ELSE
+	SLEEPY	080H		;70 ms
+	%ENDIF
+
+	;disable DTMF tones
+	mov	dptr,#6000h	;address control register 0
+	mov	a,#19h		;DISABLE transmit 
+	movx	@dptr,a
+	SLEEPY	50H		;
+	%ENDM
+
+;---------------------------------------------------
+;-----------------------------------------------------
+;***************
+;**  WAITF0  **
+;***************
+
+;waits "TIME" for "FLAG" to become 0 
+;if "FLAG" condition is met within "TIME", it continues the preogram
+;otherwise it jumps to "LABLE"
+
+WAITF0	%MACRO	FLAG, TIME, LABEL
+	%GENSYM x0, OK_END
+	
+	MOV	TIME7,#0	;reset seconds timer
+X0:
+	jnb	flag,OK_END
+	MOV	A,TIME7
+	CJNE	A,#TIME,X0
+	JMP	LABEL
+OK_END:
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;***************
+;**  WAITF1  **
+;***************
+
+;waits "TIME" for "FLAG" to become 1
+;if "FLAG" condition is met within "TIME", it continues the preogram
+;otherwise it jumps to "LABLE"
+
+WAITF1	%MACRO	FLAG, TIME, LABEL
+	%GENSYM x0, OK_END
+	
+	MOV	TIME7,#0	;reset seconds timer
+X0:
+	jb	flag,OK_END
+	MOV	A,TIME7
+	CJNE	A,#TIME,X0
+	JMP	LABEL
+OK_END:
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;***************
+;**  S_WAITF1  **
+;***************
+
+;waits "TIME" for "FLAG" to become 1
+;if "FLAG" condition is met within "TIME", it continues the program
+;otherwise it jumps to "LABLE"
+
+;USES TIME6 increases in milliseconds 
+;iNSTEAD OF TIME7 TO AVOID CONFLICT WHEN USED WITHIN A
+;SUBROUTINE. WAITF1 IS TO BE USED ONLY IN THE MAIN PROGRAM.
+
+S_WAITF1	%MACRO	FLAG, TIME, LABEL
+	%GENSYM x0, OK_END
+	
+	MOV	TIME6,#0	;reset MILIseconds timer
+X0:
+	jb	flag,OK_END
+	MOV	A,TIME6
+;-----------------------------------------------------
+;;;	this is to make it jum if TIMER-6 is larger than TIME
+;	clr	c
+;	subb	a, #time
+;	jc	ok_end
+;-----------------------------------------------------
+	CJNE	A,#TIME,X0
+	JMP	LABEL
+OK_END:
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;***************
+;**  WAIT1  **
+;***************
+
+;waits "TIME" seconds for "FLAG" to become 1 LOPPING TO LABEL 2 WHILE WAITING
+;if "FLAG" condition is met within "TIME", it continues the program
+;otherwise it jumps to "LABLE 1"
+
+;BEFORE USING THIS ROUTINE IT IS NECESARY TO RESET TIMER7: MOV TIME7,#0
+;JUST BEFORE THE LABEL2
+
+WAIT1	%MACRO	FLAG, TIME, LABEL1, LABEL2
+	%GENSYM OK_END, NO_TIME_OUT
+	
+	jb	flag,OK_END
+	mov	a,#time
+	clr	c
+	subb	a,time7
+	jnc	no_time_out
+	JMP	LABEL1
+NO_TIME_OUT:
+	JMP	LABEL2
+
+OK_END:
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;***************
+;**  WAIT0  **
+;***************
+
+;waits "TIME" for "FLAG" to become 1 LOPPING TO ANOTHER LABEL WHILE WAITING
+;if "FLAG" condition is met within "TIME", it continues the preogram
+;otherwise it jumps to "LABLE"
+
+;BEFORE USING THIS ROUTINE IT IS NECESARY TO RESET TIMER7: MOV TIME7,#0
+;JUST BEFORE THE LABEL2
+
+WAIT0	%MACRO	FLAG, TIME, LABEL1, LABEL2
+	%GENSYM OK_END, NO_TIME_OUT
+	
+
+	jNb	flag,OK_END
+
+	MOV	A,TIME7
+	CJNE	A,#TIME,NO_TIME_OUT
+	JMP	LABEL1
+
+NO_TIME_OUT:
+	JMP	LABEL2
+
+OK_END:
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;*************
+;**  PUT_S  **
+;*************
+
+;Grabs S_LENGTH bytes from string starting at offset S_OFFSET 
+;and sends them to serial port
+
+PUT_S	%MACRO	s_offset, s_length
+	%GENSYM	loop
+	push	psw
+	CLR	RS0	;SET REG BANK 0
+	CLR	RS1
+
+	mov	r0,#s_offset
+	mov	r1,#s_length
+loop:
+	mov	a,@r0
+	call	txda
+	inc	r0
+	djnz	r1,loop
+	pop	psw
+	%ENDM
+;-----------------------------------------------------
+;*****************
+;**  GET_DMB  **
+;*****************
+
+;transfers a program coded $-terminated string "dummy" 
+;to an allocated RAM space starting at offset s_offset
+
+GET_DMB	%MACRO	s_offset, dummy
+	%GENSYM	loop, cont, fini
+	push	psw
+	PUSH	Acc		;NEEDED FOR INDIRECT ADDRESING
+
+	CLR	RS0	;SET REG BANK 0
+	CLR	RS1
+
+	mov	dptr,#dummy	;load dptr with offset of coded string
+	mov	r0,#s_offset	;load R0 with offset of RAM destination
+	mov	r2,#0		;string indirect addressing pointer
+loop:
+	mov	a,r2		;point to next coded dummy character
+	movc	a,@a+dptr	;get character
+	mov	@r0,a		;store byte in s_offset
+	cjne	a,#"$",cont	;if not last byte, get next character
+	jmp	fini		;if last byte ($) exit
+cont:
+	inc	r0
+	inc	r2
+	jmp	loop
+fini:
+	Pop	Acc		;NEEDED FOR INDIRECT ADDRESING
+	pop	psw
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;*****************
+;**  COMP  **
+;*****************
+
+;COMPARE  A DECLARED STRING WITH A BUFFER both ending with "$" 
+
+COMP	%MACRO	s_offset, dummy
+	%GENSYM	loop, cont, fini
+	push	psw
+	PUSH	Acc		;NEEDED FOR INDIRECT ADDRESING
+
+	CLR	RS0	;SET REG BANK 0
+	CLR	RS1
+	mov	sm_code, #0	;defaul exit not-equal code
+
+	mov	dptr,#dummy	;load dptr with offset of coded string
+	mov	r0,#s_offset	;load R0 with offset of RAM destination
+	mov	r2,#0		;string indirect addressing pointer
+loop:
+	mov	a,r2		;point to next coded dummy character
+	movc	a,@a+dptr	;get character
+	cjne	a,#"$",cont	;if not last byte, get next character
+	mov	sm_code, #1	;compare ok
+	jmp	fini		;if last byte ($) exit
+cont:
+	clr	c
+	subb	a, @r0
+	jnz	fini		;string and buffer are not equal
+	inc	r0
+	inc	r2
+	jmp	loop
+fini:
+	Pop	Acc		;NEEDED FOR INDIRECT ADDRESING
+	pop	psw
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;***************
+;**  PUT_DTMF **
+;***************
+
+;Grabs $-TERMINATED digit string starting at offset S_OFFSET 
+;in indirect ram
+;and sends a DTMF tone for each digit
+
+PUT_DTMF	%MACRO	s_offset
+	%GENSYM	loop, keepon, p_exit, send_tone
+
+	PUSH	ACC
+	PUSH	PSW
+	CLR	RS0	;SET REG BANK 0
+	clr	RS1
+
+	mov	r0,#s_offset
+	enable_tones
+loop:
+	mov	a,@r0
+	cjne	a,#"$",keepon
+	jmp	p_exit
+	
+keepon:
+;---------------------------------------------------
+	ANL	A,#0FH		;ELIMINATE ASCII CODE FOR DIGITS
+
+	call	test09
+
+	JNZ	SEND_TONE
+	mov	a,#0ah		;correct dtmf modem code for ZERO
+send_tone:
+	TONE
+;---------------------------------------------------
+	inc	r0
+	jmp	loop
+p_exit:
+	POP	PSW
+	POP	ACC
+	%ENDM
+;-----------------------------------------------------
+;-----------------------------------------------------
+;***************
+;**  PUT_SER  **
+;***************
+
+;Grabs $-TERMINATED string starting at offset S_OFFSET 
+;and sends them to serial port
+
+PUT_SER	%MACRO	s_offset
+	%GENSYM	loop, keepon, p_exit
+
+	push	psw
+	CLR	RS0	;SET REG BANK 0
+	CLR	RS1
+
+	mov	r0,#s_offset
+loop:
+	mov	a,@r0
+	call	txda
+	cjne	a,#"$",keepon
+	jmp	p_exit
+	
+keepon:
+	inc	r0
+	jmp	loop
+p_exit:
+	pop	psw
+	%ENDM
+;-----------------------------------------------------
+;**************
+;**  WAIT_S  **
+;**************
+
+;wait TIME to receive FLAG character from modem. 
+;If FLAG is not received in TIME, disable modem (switch off carrier).
+;received character, including FLAG will remain in accumulator.
+
+WAIT_S	%MACRO	FLAG, TIME
+	%GENSYM	LOOP, GET_TAG
+
+	push	psw
+	CLR	RS0	;SET REG BANK 0
+	CLR	RS1
+
+	MOV	R5,#0FFH
+	MOV	R6,#0B3H
+	MOV	R7,#0
+LOOP:
+	DJNZ	R5,$
+	DJNZ	R6,LOOP
+	MOV	A,R7
+	INC	A
+	MOV	R7,A
+	CJNE	A,#TIME,GET_TAG	;if not time-out, receive next byte
+	call	reset_mod
+	jmp	wait_card
+GET_TAG:	
+	clr	ri		;just in case we have a receive flag
+	mov	a,sbuf		;get next character
+	CJNE	A,#FLAG,LOOP	;WAIT FOR TAG
+	pop	psw
+
+	%ENDM
+
+
+
+;-----------------------------------------------------
+;*****************
+;**  SAVE_SEQN  **
+;*****************
+
+SAVE_SEQN	%MACRO	
+	%GENSYM	NO_TEN
+
+	push	psw
+	clr	rs0
+	clr	rs1
+
+	mov	r0,#c_seqn
+	MOV	A,@R0
+	inc	A
+
+	call	test09
+;	CJNE	A,#10,NO_TEN	;ONLY DIGITS 0 TO 9
+;	MOV	A,#0
+
+NO_TEN:
+	MOV	@R0,A
+	inc	r0
+	mov	@r0,#"$"
+
+	;store in ram
+	MOV	R0,#C_seqn	;indirect internal ram  ADDRESS for seqn
+	mov	DPTR,#0c006h	;external ram address for seqn
+	MOV	A,@R0
+	MOVX	@DPTR,A
+	sleepy	15		;extra time to store in eeprom
+	INC	DPTR
+	MOV	A,#"$"
+	MOVX	@DPTR,A
+	sleepy	15		;extra time to store in eeprom
+
+	pop	psw
+	
+	%ENDM

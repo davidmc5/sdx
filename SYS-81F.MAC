@@ -1,0 +1,945 @@
+;THIS FILE SHOULD BE RESERVED TO MACROS THAT ONLY RUN ONCE
+;IN THE MAIN PROGRAM
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+WAIT_SERVICE	%MACRO
+
+;the original of this macro is in the file service.1
+;use this macro only once in the main program
+
+
+wait_on_service:
+;	clr	armed			;used by watch-dog timer
+	clr	asctr			;mantain MPP power and nokia
+	clr	ready		;allow active watchdog timer to reset board
+	setb	ea
+	SETB	IE.1		;ENABLE TIMER 0 INTERRUPT
+	setb	ie.6		; enable PCA for watchdog timer
+	setb	bypass		;allow radio to talk to handset
+
+	JMPB	F_POWER, 0, XX1		;jump if power flag is off
+
+	; POWER FLAG IS ON, test ignition
+	; IGNITION SENSE IS NEGATIVE LOGIC !!
+	; antibounce delay for ingnition key
+
+	setb	ignit			;allow to sense ignition
+	jmpb	ignit, 0, xx2		;jump if ignition is on
+	sleepy	250
+	sleepy	250
+	setb	ignit			;allow to sense ignition
+	jmpb	ignit, 0, xx2
+	jmp	power_off
+;------------------------------------------------------------------
+xx1:				
+	; POWER FLAG IS OFF, test ignition
+	; IGNITION SENSE IS NEGATIVE LOGIC !!
+	; antibounce delay for ingnition key
+
+	setb	ignit			;allow to sense ignition
+	jmpb	ignit, 1, xx4
+	sleepy	250
+	sleepy	250
+	setb	ignit			;allow to sense ignition
+	jmpb	ignit, 1, xx4
+	jmp	power_up
+;-----------------------------------
+xx4:
+	; this is to detect if hset is answering (operative while power off)
+;;;
+	send_message	0, hset
+	jeq	f_error, #0, hset_on		;hset is on
+hset_off:
+	clr	valid			; reset multiple calls
+	clr	ready
+	setb	ea
+	SETB	IE.1		; ENABLE TIMER 0 INTERRUPT
+	setb	ie.6		; enable PCA for watchdog timer
+	clr	bypass		; stop radio to talk to handset
+	clr	f_power
+
+	setb	asctr			; cut power to MPP and Nokia
+	sleep	50
+;;;-------------------------
+	; remain in this loop until ignition on
+	setb	ready		; disable watchdog
+	jb	ignit, $	; modified for continuous power on
+	clr	ready		; enable watchdog
+	jmp	wait_on_service
+;;;-------------------------
+
+hset_on:
+;;;
+	setb	f_power
+	jmp	wait_on_service
+;-----------------------------------
+power_up:
+	POWER_UP
+	jmp	wait_on_service
+;-----------------------------------
+xx2:
+	; this is to detect if hset is answering (operative while power on)
+	send_message	0, hset
+	jeq	f_error, #0, xx3	;jump if hset is answering
+	clr	valid
+	clr	f_power
+	jmp	wait_on_service
+
+
+power_off:		; jump here to hset off ???
+	clr	ready
+	setb	ea
+	SETB	IE.1		; ENABLE TIMER 0 INTERRUPT
+	setb	ie.6		; enable PCA for watchdog timer
+
+	POWER_OFF
+
+	jmp	xx4
+
+;	clr	bypass		; stop radio to talk to handset
+;	setb	asctr		; cut power to MPP and Nokia
+;	sleep	50		; and wait until power is off
+;	setb	ignit		; allow to sense ignition
+;;;-------------------------
+	; remain in this loop until ignition on
+;	jb	ignit, $	; modified for continuous power on
+;	jmp	wait_on_service
+;;;-------------------------
+;;	jmpb	ignit, 0, wait_on_service
+;;	jmp	power_off
+;;	jmp	wait_on_service
+;-----------------------------------
+xx3:
+	WAIT_GLOBAL		;ALLOW SOME BUS INACTIVITY and restore globals
+	get_radio_stat
+	JMPB	SERVICE, 0, WAIT_ON_SERVICE
+exit:
+	wait_global
+	send_message 05h, trx, <81h>	;press "end" to CLEAR RADIO
+	STOP_GLOBALS
+	sleepy 200
+	%endm
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+GET_NUMBER	%MACRO
+
+	;this macro is called to detect if the asterisc * is pressed
+	;needs to retrieve acknoledgment for * and key release messages
+	;before intercepting new keys
+
+	push	psw	;to save register bank selection rs0, rs1
+	setb	RS0		;SET REG BANK 1
+	CLR	RS1
+	MOV	SM_CODE,#1	;default, wait for service
+	clr	IE.5		;disable card reader (shared buffer & reg bank)
+	mov	r0, #raw_c	;buffer in indirect ram for dialed digits
+	mov	r5, #0		;pointer to buffer
+	mov	a, r_data
+	mov	r7, r_data	;store key pressed
+;------------------------------------
+	;put here # redial
+	cjne	a, #"#", ww1		; check if redial code
+	jmp	ww2
+ww1:
+	jmp	hhh
+ww2:
+	get_dmb c_expd, multi_same	; code for redial 
+	get_message	trx	; retrieve acknowlegment
+	sleepy	20
+	SEND_MESSAGE	6, trx, 0	; send a key release after globals
+	get_message	trx	; retrieve acknowlegment
+	jmp	string_end
+
+hhh:
+;------------------------------------
+	;put here *-user codes
+	cjne	a, #"*", ww3		; check if user code
+	jmp	ww4
+ww3:
+	jmp	jjj
+ww4:
+	get_dmb c_expd, multi_code	; code for redial 
+	get_message	trx	; retrieve acknowlegment
+	sleepy	20
+	SEND_MESSAGE	6, trx, 0	; send a key release after globals
+	get_message	trx	; retrieve acknowlegment
+	jmp	sss
+
+jjj:
+;------------------------------------
+
+	anl	a, #0f0h
+	cjne	a, #30h, qqq	;exit if not a number
+	jmp	rrr
+
+
+
+qqq:
+	jeq	r_data, #86h, wait_service
+;;
+	get_message	trx	; retrieve acknowlegment
+	sleepy	20
+	send_message 05h, trx, <87h>	;press "clr" to CLEAR RADIO
+	jmp	exit3
+
+rrr:
+	;a number has been dialed, store it
+	mov	r7, r_data	;store key pressed
+	mov	a, r_data
+	mov	@r0, a
+	inc	r0
+	inc	r5
+sss:
+	clr	key_flag
+	CLR	D_ONE
+	CLR	D_ZERO
+	CLR	USER_CODE
+
+;; improve this
+	start_globals
+	get_message	trx
+	SEND_MESSAGE	6, trx, 0	; send a key release after globals
+
+print_x:	
+	jne	r7, #"*", print_0
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","*">
+	SETB	USER_CODE		;set flag '*' CODES ARE COMMING
+	jmp	print_end
+
+print_0:	
+	jne	r7, #30h, print_1
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","0">
+	SETB	D_ZERO			;set flag to indicate 1st digit is a 0
+	jmp	print_end
+
+print_1:	
+	jne	r7, #31h, print_2
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","1">
+	SETB	D_ONE			;set flag to indicate 1st digit is a 1
+	jmp	print_end
+print_2:	
+	jne	r7, #32h, print_3
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","2">
+	jmp	print_end
+print_3:	
+	jne	r7, #33h, print_4
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","3">
+	jmp	print_end
+print_4:	
+	jne	r7, #34h, print_5
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","4">
+	jmp	print_end
+print_5:	
+	jne	r7, #35h, print_6
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","5">
+	jmp	print_end
+print_6:	
+	jne	r7, #36h, print_7
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","6">
+	jmp	print_end
+print_7:	
+	jne	r7, #37h, print_8
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","7">
+	jmp	print_end
+print_8:	
+	jne	r7, #38h, print_9
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","8">
+	jmp	print_end
+print_9:	
+	jne	r7, #39h, print_end 
+	SEND_MESSAGE 38H, HSET, <" "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","9">
+
+print_end:
+
+wait_end_key:
+	setb	ignit			;allow to sense ignition
+	jmpb	ignit, 1, wait_service
+
+	; globals are on
+	get_message HSET			;check if a key was pressed
+
+	JNE	F_ERROR, #0, wait_end_key	;jump if no key pressed
+
+	JNE	R_TYPE, #0, GET_NUMBER
+	wait_message	trx
+	JNE	F_ERROR, #0, wait_service	; jump if no key pressed
+	jeq	r_type, #0, wait_service	; jump if global no-op
+
+;	JMP	WAIT_SERVICE
+
+GET_NUMBER:
+	JNE	R_TYPE, #5, wait_end_key	;make sure it is a key-presd
+
+;..
+	Jne	R_DATA, #00H, get_number1	;ignore abnormal key 00 (??)
+	wait_global
+	SEND_MESSAGE	6, trx, 0	; send a key release after globals
+	jmp	wait_end_key
+GET_NUMBER1:
+;..
+
+
+	JEQ	R_DATA, #81H, end_exit	;is the "END" key? 
+	JEQ	R_DATA, #8AH, end_exit	;user has hang up hset
+;::::::::::::::::::::::::::::::::::
+	;put here buffer control
+
+	;detect if key pressed is a number (the data byte starts with 3)
+	mov	a, r_data
+	anl	a, #0f0h
+	cjne	a, #30h, tmpx1
+	jmp	tmpx2
+
+tmpx1:
+	jmp	end_exit
+
+tmpx2:
+
+	;a number has been dialed, store it
+	mov	a, r_data
+	mov	@r0, a
+	inc	r0
+	inc	r5
+
+	
+	jne	r5, #3, chk_num
+test_999:
+	mov	r1, #raw_c
+	mov	a, @r1
+	cjne	a, #"9", go_wait_end_k
+	inc	r1
+	mov	a, @r1
+	cjne	a, #"9", go_911
+	inc	r1
+	mov	a, @r1
+	cjne	a, #"9", go_wait_end_k
+	wait_global
+	send_message 05h, trx, <81h>	;press "end" to clear display
+	jmp	service_loop
+
+go_wait_end_k
+	jmp	wait_end_key
+
+go_911:
+	jmp	test_911
+
+service_loop:
+	wait_message	trx
+	JNE	F_ERROR, #0, service_loop	; jump if no key pressed
+	JNE	R_TYPE, #5, service_loop	;make sure it is a key-presd
+	JEQ	R_DATA, #80H, end_exit		;is the "SEND" key? 
+	JEQ	R_DATA, #81H, end_exit		;is the "END" key? 
+	JEQ	R_DATA, #8AH, end_exit		;user has hang up hset
+	jmp	service_loop
+;;::::::::::::::::::::::::::::::::::
+
+
+test_911:
+	mov	r1, #raw_c
+	mov	a, @r1
+	cjne	a, #39h, wait_end_k
+	inc	r1
+	mov	a, @r1
+	cjne	a, #31h, wait_end_k
+	inc	r1
+	mov	a, @r1
+	cjne	a, #31h, wait_end_k
+	jmp	press_send
+
+wait_end_k:
+	jmp	wait_end_key
+
+;------------------------------
+chk_num:
+	jmpb	d_one, 0, no_one	;if first digit is 1, wait 11 digits
+	cjne	r5, #11, wait_end_k
+	GET_DMB	C_EXPD, multi_numb		; load code for multiple calls 9000
+	jmp	string_end
+;------------------------------
+
+no_one:
+	jmpb	d_zero, 0, no_zero	;if first digit is 0, wait 13 digits
+	cjne	r5, #13, wait_end_k
+	GET_DMB	C_EXPD, multi_numb		; load code for multiple calls 9000
+	jmp	string_end
+;------------------------------
+;;
+no_zero:
+	jmpb	user_code, 0, no_code	;user has dialed a 2-digits *-code
+	cjne	r5, #2, wait_end_k1
+	
+	;; number is a *-code
+	get_dmb	c_expd, multi_code
+	jmp	string_end
+
+;------------------------------
+no_code:
+	cjne	r5, #10, wait_end_k1	;if 1st digit is not 1 or 0 wait for 10
+	GET_DMB	C_EXPD, multi_numb		; load code for multiple calls 9000
+	jmp	string_end
+;------------------------------
+
+wait_end_k1:
+	jmp	wait_end_key
+
+
+;------------------------------
+string_end:
+	mov	@r0, #"$"		;store end of string
+
+;;#------------------------------
+;place here a jump if *61 has been dialed
+	mov	r0, #raw_c
+	mov	a, @r0
+
+	; test 61
+	cjne	a, #"6", end_test_svc
+
+	jmp	start_call
+
+	inc	r0
+	mov	a, @r0
+	cjne	a, #"1", end_test_svc
+	jmp	start_call
+end_test_svc:
+
+
+	jmpb	c_valid, 0, end_exit	;do not allow 'send' key if not mult.
+
+start_call:
+;jump here if *61 to initiate call in 'slide card'
+
+
+;------------------------------
+
+
+	mov	r0, #raw_c		;reset pointers for string copy
+	mov	r1, #c_numb
+	mov	r2, #0
+;;
+save_num:
+	mov	a, @r0	
+	cjne	a, #"$", tag1		;end of string
+	mov	@r1, a			;transfer END DELIMITER
+	jmp	tag3
+
+tag1:
+	cjne	r2, #24, tag2		;card buffer has only 24 bytes storage
+	jmp	end_exit		;error, exceded max buffer capacity
+
+tag2:
+	mov	@r1, a			;transfer next byte
+	inc	r0
+	inc	r1
+	inc	r2
+	jmp	save_num
+
+tag3:
+	MOV	SM_CODE,#0		;code to initiate call
+	setb	asctr			;set data on
+	CLR	IE.5			;disable card interrupt
+	
+	jmp	end_exit
+
+press_send:
+	wait_global
+	send_message 05h, trx, <80h>	;press SEND key after 911 or 411
+				;and wait in loop until 'end' is pressed
+
+loop_wait:
+	jmp	wait_end_key
+
+
+end_exit:	
+;;
+	get_radio_stat
+	jmpb	global, 0, end_exit1
+
+	stop_globals
+end_exit1:
+	setb	IE.5		;enabler card reader (shared buffer & reg bank)
+	clr	key_flag	;don't wait for key release
+;;
+	sleepy	25
+	send_message 05h, trx, <81h>	;press "end" to clear display
+	sleepy	25
+	SEND_MESSAGE	6, trx, 0	; send a key release after globals
+
+
+exit3:
+	pop	psw		;retrieve selected register bank
+	%ENDM
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+JNE	%MACRO	FLAG_BYTE, VALUE, JMP_LABEL
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+	%GENSYM	EQUAL, NOT_EQUAL
+
+	;this macro jumps to the label JMP_LABEL if the given byte
+	;FLAG_BYTE is NOT equal to VALUE. Otherwise it continues the 
+	;program
+	mov	a,FLAG_BYTE
+	cjne	a, VALUE, NOT_EQUAL	;
+	jmp	EQUAL			;
+
+NOT_EQUAL:
+	jmp	JMP_LABEL		;
+
+EQUAL:
+	%ENDM	
+
+
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+JEQ	%MACRO	FLAG_BYTE, VALUE, JMP_LABEL
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+	%GENSYM	EQUAL, NOT_EQUAL
+
+
+	;this macro jumps to the label JMP_LABEL if the given byte
+	;FLAG_BYTE is equal to VALUE. Otherwise it continues the 
+	;program
+
+	mov	a,FLAG_BYTE
+	cjne	a, VALUE, NOT_EQUAL	;
+	jmp	JMP_LABEL		;
+
+NOT_EQUAL:
+	%ENDM	
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+JUMPIF	%MACRO	X_CODE, JUMP_LABEL
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+	%GENSYM	X_EXIT
+
+
+	;this macro jumps to label JUMP_LABEL if SM_CODE is equal to
+	;given X_CODE. else it continues the program. It is used for the
+	;state machine of the main program.
+
+	mov	a, #x_code
+	anl	a, #0fh		;use MSN for code, LSN for data
+	cjne	a, SM_CODE, X_EXIT
+	jmp	JUMP_LABEL
+
+X_EXIT:
+	%ENDM
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+JMPB	%MACRO	BIT_FLAG, LEVEL, JUMP_LABEL
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+	%GENSYM	NOT_YET
+	;this macro jumps to a label JUMP_LABEL if the reference flag
+	;BIT_FLAG is set or clear as specified by LEVEL (1 or 0)
+
+
+	%IF	LEVEL eq "0"
+	jb	bit_flag, not_yet
+	jmp	jump_label
+	%else
+	jnb	bit_flag, not_yet
+	jmp	jump_label
+	%endif
+NOT_YET:
+	%ENDM
+
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+WAIT_USER	%MACRO
+;-----------------------------------------------------------------
+WAIT_CARD:
+;;
+;	clr	door		;enable this line to cancell card only 
+				;if door open during idle state of phone
+				;see also TIME_E / SDX.SUB
+
+	mov	sm_code,#1		;default code to wait for user
+	JMPB	C_VALID, 1, MULTIPLE_CALL
+	;WRITE "SLIDE CARD"
+	;E
+	SEND_MESSAGE 38H, HSET, <"S","L","I","D","E"," "," "," "," "," "," "," ","C","A","R","D" >
+	sleepy 200
+	jmp	call_x0
+
+;----------------------------------------------------------
+MULTIPLE_CALL:
+
+	;WRITE "PRESS SEND"
+	;E
+;	SEND_MESSAGE 38H, HSET, <50H,52H,45H,53H,53H,20H,20H,20H,20h,20h,22H,53H,45H,4eH,44H,22H >
+	SEND_MESSAGE 38H, HSET, <"R","E","A","D","Y"," "," "," ","T","O"," "," ","D","I","A","L" >
+;----------------------------------------------------------
+CALL_X0:
+	INIT_CARD	
+	CLR	ASCTR		;ANALOG SW  AUDIO ON
+	clr	key_flag
+;----------------------------------------------------------
+	MOV	TIME7,#0
+	;BECAREFUL, WAIT_GLOBAL RESETS THIS COUNTER
+CALL_X:
+	sleepy	85			;delay before next send_global
+
+
+
+
+
+;--------------------
+;;	;checking door
+;----------------------------------------------------------
+	; new door routine
+;----------------------------------------------------------
+	; DOOR_TYPE	0= 0V, 1= 12V DOOR SWITCH normal open when door closed
+	; DOOR_POS	0= door open, door switch closed sends 12V to light
+	; DOOR_NEG	0= door open, door switch closed sends  0V to light
+	; if open door event should be ignored during a multiple call, 
+	; delete JMPB line after CLOSE_DOOR: label to reset DOOR open flag.
+	; (see option case 2 below)
+
+	;-----------------------------------------------------------------
+	; C_VALID	+	CAR DOOR  --->	ACTION
+	;-----------------------------------------------------------------
+	; no multiple		closed		clear door flag
+	; multiple		closed		clear door flag (optional)
+	; no multiple		open		set door flag
+	; multiple		open		set door flag
+	;-----------------------------------------------------------------
+	jmpb	door_type, 1, positive_door
+negative_door:				;courtesy light 12V / door switch 0V
+	jmpb	door_neg, 1, close_door
+	jmp	open_door
+
+positive_door:				;courtesy light  0V / door switch 12V
+	jmpb	door_pos, 1, close_door
+	jmp	open_door
+
+open_door:
+	setb	door			; door has been opened
+	jmp	exit_door
+
+close_door:				;door has been closed 
+
+	; delete next line to clear card only when door opens 
+	; while phone is idle (not on call / waiting for user).
+	; otherwise it will memorize open door event during a call
+	; and will cancel card as soon as the call terminates.
+
+	jmpb	c_valid, 1, exit_door	;memorize open door if in "ready/dial"
+	clr	door			;clear open event   if in "slide card"
+exit_door:
+	;-----------------------------------------------------------------
+	;-----------------------------------------------------------------
+
+	; check if door switch is to be used at all
+chk_closed:
+	jne	door_code, #00h, chk_open
+	jmp	cont				; ignore switch, asume closed
+
+chk_open:
+	jne	door_code, #01h, chk_normal
+	jmpb	c_valid, 0, cont
+	clr	c_valid
+	jmp	wait_card
+
+chk_normal:
+	jmpb	door, 0, cont
+	jmpb	c_valid, 0, cont
+	clr	c_valid
+	jmp	wait_card
+
+cont:
+;--------------------
+
+
+
+	setb	ignit			;allow to sense ignition
+ 	jmpb	ignit,1, out_exit
+	jmpb	s_card, 1, get_card
+
+	;scan keys
+	jmpb	f_call, 1, call_1
+	send_message	7fh, 0f0h, <0ffh, 1>	;SEND GLOBAL, no call
+	jmp	call_2
+
+call_1:
+	send_message	7fh, 0f0h, <0ffh, 81h>	;SEND GLOBAL, ON call 
+call_2:
+	get_message HSET			;check if a key was pressed
+	JNE	F_ERROR, #0, CACA_LISA		;jump if no key pressed
+	jne	r_type, #6, no_release
+	clr	key_flag 
+	sleepy	30
+
+no_release:
+	JNE	R_TYPE, #5, call_x	;make sure it is a key-pressed message
+
+	setb	key_flag		;key release pending. don't bother hset
+
+	JNE	R_DATA, #80H, COCO_LISO		;is the "SEND" key? 
+	jmpb	c_valid, 0, end_key	;do not allow 'send' key if not mult.
+
+	;SEND KEY, initiate a call to the gateway
+
+;;..	;this following message is to avoid the ACK from TRX to the key press
+	get_message HSET		;retrieve acknowledgment
+	sleepy	60			;wait 50 ms
+	send_message 05h, trx, <81h>	;press "end" to stop call
+	SLEEPY	60			;wait before next send message
+	setb	asctr			;set data on
+	clr	key_flag
+	CLR	IE.5			;disable card interrupt
+	GET_DMB	C_EXPD, multi_null	;load no-number handshake code
+	jmp	next_step
+
+coco_liso:
+	JEQ	R_DATA, #81H, end_key		;if "end" key goto "slide card"
+
+;;;
+	;-------------	
+	get_number
+	sleepy	120		;this time is critical if reduced ????
+	;-------------
+	jumpif	0, out_exit;
+	;else
+	jmp	wait_card			
+
+
+end_key:				;end_key pressed, goto slide card
+	sleepy	250
+	send_message 05h, trx, <81h>	;press "end" to stop call
+	clr	key_flag
+	clr	c_valid				
+	jmp	wait_card			
+
+
+caca_lisa:
+	
+	;don't check hset status if waiting for a key release
+	jmpb	key_flag, 1, call_x	
+
+	; this is to detect if hset is operative
+	; if not, then clear power flag to force power up sequence
+	send_message	0, hset			;NOOP to detect handset on
+	jeq	f_error, #0, xyz
+	clr	f_power
+	jmp	out_exit
+
+xyz:
+	;THIS COMMAND RESETS THE TIMER FOR WAIT0. WRONG!!
+	get_radio_stat			
+	JMPB	SERVICE, 0, out_exit
+
+	;if "on call" and "slide card" for more than 30 sec press "end"
+	wait0	f_call, 30, on_call_error, call_x	; ???
+
+	mov	time7, #0
+	jmp	call_x
+
+on_call_error:
+	send_message 05h, trx, <81h>		;press "end" to stop call
+	sleepy	200
+	jmp	out_exit
+
+
+GET_CARD:
+	clr	s_card		;card acknowledged
+	;card is being read in background, interrupt driven
+;--------------------------------
+	SETB	ASCTR		;ANALOG SW DATA ON
+;----------------------------------------------------------
+	WAITF0	S_FLAG, 2, BAD_READ
+	clr	ie.5		;read complete. Disable card interrupt
+	jmpb	valid, 0, next_step	;good credit card format
+BAD_READ:
+	CLR	IE.5
+	GET_DMB	C_EXPD, multi_stop	;default no user action or error
+	jmp	out_exit
+
+NEXT_STEP:
+	mov	sm_code,#0		;correct card format, call gateway
+OUT_EXIT:
+	clr	trap		;find out if mised a step
+	%ENDM
+
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+WAIT_END	%MACRO
+	%GENSYM	NOKEY, hangup
+; detect "end" key and exit
+	
+	sleepy	100
+	send_message	7fh, 0f0h, <0ffh, 81h>	;SEND GLOBAL,turn on call lite
+	get_message HSET
+
+	JNE	F_ERROR, #0, NOKEY		;jump if no key pressed
+	JNE	R_TYPE, #5, NOKEY	;make sure it is a key-pressed message
+;	jeq	r_data, #8ah, hangup
+	JNE	R_DATA, #81H, NOKEY		;is the "END" key? 
+;hangup:
+	SLEEPY	100			;wait before next send message
+
+	send_message 05h, trx, <81h>	;press "end" to stop call
+	SLEEPY	100			;wait before next send message
+	send_message 06h, trx		;send a key release to cut long beep?
+	SETB BYPASS
+	sleepy	100
+	send_message	7fh, 0f0h, <0ffh, 01h>	;SEND GLOBAL,turn on call lite
+
+	jmp	wait_USER
+NOKEY:
+	%ENDM
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+POWER_UP	%MACRO
+		%GENSYM	POWER_UP, OK_ON
+
+;the original of this macro is in the file powerup.1
+
+power_up:
+;;
+	clr	ready		;allow active watchdog timer to reset board
+	setb	ea
+	SETB	IE.1		;ENABLE TIMER 0 INTERRUPT
+	setb	ie.6		; enable PCA for watchdog timer
+	setb	bypass		;allow radio to talk to handset
+
+;	clr	asctr	;analog switch to voice to give mic bias
+	get_radio_stat
+	jmpb	service, 1, OK_ON
+	WAIT_GLOBAL		;ALLOW SOME BUS INACTIVITY and restore globals
+	JEQ	R_TYPE, #7FH, OK_ON	;already on, exit
+	send_message 05h, trx, <86h>	;press on/off, to clear hset
+
+SPEED_UP:
+	WAIT_GLOBAL		;ALLOW SOME BUS INACTIVITY and restore globals
+	JEQ	R_TYPE, #7FH, OK_ON	;already on, exit
+
+
+
+	;for some misterious reason, the 'turn power on' command 42h
+	;must be sent twice to work. (the radio only sends it once.)
+	;and the hset does not bother acknoledging
+
+;	CALL	POWER_ON_SUB
+;	sleepy	100
+;	CALL	POWER_ON_SUB
+
+	;anounce serial number (11h) will come now if hset is planning to go on.
+
+	send_message	42h, 0e0h, <1>
+
+	wait_message
+	JEQ	R_TYPE, #11H, OK_ON	;wait 2 noops to get 11h confirmation
+	jmp	speed_up
+
+OK_ON:
+	wait_global			;wait until globals are restablished
+	JnE	R_TYPE, #7FH, speed_up	;already on, exit
+	setb	f_power
+	%ENDM
+
+;-----------------------------------------------------------------
+;-----------------------------------------------------------------
+;------------------------------------------------------------------
+POWER_OFF	%MACRO
+
+	;IGNITION IS DEFINITELY OFF. initiate power off sequence
+TURN_OFF:
+	clr	f_call
+	clr	c_valid		;do not allow multiple calls
+	clr	ready		;allow active watchdog timer to reset board
+	setb	ea
+	SETB	IE.1		;ENABLE TIMER 0 INTERRUPT
+	setb	ie.6		; enable PCA for watchdog timer
+	setb	bypass		;allow radio to talk to handset
+
+
+	;hset is not off yet, recicle power on/ power off
+	wait_global			;make sure globals are on
+	;send_message	42h, HSET, 0
+	send_message 05h, trx, <86h>	;press on/off
+	sleep	10
+
+
+	;test if hset is really off (should not answer global no-ops)
+	send_message	0, hset
+	jeq	f_error, #0, turn_off
+	
+	clr	bypass		;lock hset talk to radio
+	SETB	ASCTR		;ANALOG SW DATA ON to cut power signal to trx
+	sleep	50
+
+	get_radio_stat
+	jmpb	service, 1, wait_on_service
+	clr	f_power
+
+	;return modem to standby for power reduction
+	mov	dptr,#6000h	;address control register 0
+	mov	a,#00h		;power down, reset
+	movx	@dptr,a
+	mov	dptr,#6001h	;address control register 1
+	mov	a,#04h		;reset modem
+	movx	@dptr,a
+	
+	mov	dptr,#0
+	mov	a, #0
+	movx	@dptr,a
+
+	%ENDM
+;------------------------------------------------------------------
